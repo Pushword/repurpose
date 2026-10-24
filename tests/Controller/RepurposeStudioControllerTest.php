@@ -7,14 +7,19 @@ namespace Pushword\Repurpose\Tests\Controller;
 use Doctrine\ORM\EntityManagerInterface;
 use Override;
 use PHPUnit\Framework\Attributes\Group;
+use Pushword\Core\Entity\Media;
 use Pushword\Core\Entity\Page;
 use Pushword\Core\Entity\User;
+use Pushword\Core\Tests\PathTrait;
 use Pushword\Repurpose\Entity\SocialPost;
+use Pushword\Repurpose\Service\CarouselFactory;
 use Pushword\Repurpose\Service\VideoBuilder;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
+use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
 use ZipArchive;
 
 /**
@@ -26,11 +31,15 @@ use ZipArchive;
 #[Group('integration')]
 final class RepurposeStudioControllerTest extends WebTestCase
 {
+    use PathTrait;
+
     private KernelBrowser $client;
 
     private EntityManagerInterface $em;
 
     private string $testUserEmail = '';
+
+    private ?int $motionMediaId = null;
 
     private const string HOST = 'repurpose-studio-test.example';
 
@@ -63,6 +72,13 @@ final class RepurposeStudioControllerTest extends WebTestCase
         $em = $container->get('doctrine.orm.default_entity_manager');
         foreach ($em->getRepository(SocialPost::class)->findBy(['host' => self::HOST]) as $post) {
             $em->remove($post);
+        }
+
+        if (null !== $this->motionMediaId) {
+            $media = $em->find(Media::class, $this->motionMediaId);
+            if (null !== $media) {
+                $em->remove($media);
+            }
         }
 
         /** @var class-string<User> $userClass */
@@ -143,6 +159,87 @@ final class RepurposeStudioControllerTest extends WebTestCase
         self::assertSame('A brand new headline', $firstSlide['title']);
     }
 
+    public function testMotionExampleOpensWithAPlayableVideoAndStaticSlides(): void
+    {
+        $filename = 'studio-motion-nord.mp4';
+        new Filesystem()->copy(\dirname(__DIR__, 3).'/dev-app/media~/repurpose-nord.mp4', $this->getMediaDir().'/'.$filename);
+        $media = new Media()
+            ->setFileName($filename)
+            ->setMimeType('video/mp4')
+            ->setDimensions([1080, 1920])
+            ->setProjectDir(self::getContainer()->getParameter('kernel.project_dir'))
+            ->setStoreIn($this->getMediaDir())
+            ->setHash();
+        $this->em->persist($media);
+        /** @var array<string, mixed> $spec */
+        $spec = json_decode((string) file_get_contents(__DIR__.'/../../examples/nord/spec.json'), true, flags: \JSON_THROW_ON_ERROR);
+        $post = $this->persistPost([...$spec, 'video' => $filename]);
+        $this->motionMediaId = $media->id;
+        $carousel = new CarouselFactory()->fromArray($post->spec);
+        self::assertCount(0, self::getContainer()->get(ValidatorInterface::class)->validate($carousel));
+
+        $this->client->request(Request::METHOD_GET, '/admin/repurpose/studio/'.$post->id);
+        self::assertResponseIsSuccessful();
+        self::assertSelectorExists('#rp-slide-preview');
+        self::assertSelectorExists('#rp-video-preview video[controls][playsinline]');
+        self::assertStringContainsString($filename, (string) $this->client->getResponse()->getContent());
+
+        $body = $this->postJson('/admin/repurpose/studio/'.$post->id.'/preview', $post->spec);
+        self::assertResponseIsSuccessful();
+        self::assertIsArray($body['slides']);
+        self::assertCount(5, $body['slides']);
+        self::assertIsArray($body['video']);
+        self::assertSame($filename, $body['video']['name']);
+        self::assertIsString($body['video']['url']);
+
+        $this->client->request(Request::METHOD_GET, $body['video']['url'], server: ['HTTP_RANGE' => 'bytes=0-31']);
+        self::assertResponseStatusCodeSame(Response::HTTP_PARTIAL_CONTENT);
+        self::assertSame('video/mp4', $this->client->getResponse()->headers->get('Content-Type'));
+        self::assertStringStartsWith('bytes 0-31/', (string) $this->client->getResponse()->headers->get('Content-Range'));
+    }
+
+    public function testSaveCanAttachAndDetachARenderedVideo(): void
+    {
+        $post = $this->persistPost();
+        $spec = [...$this->validSpec(), 'video' => 'repurpose-nord.mp4'];
+        $this->postJson('/admin/repurpose/studio/'.$post->id.'/save', $spec);
+        self::assertResponseIsSuccessful();
+        $saved = $this->em->find(SocialPost::class, $post->id);
+        self::assertInstanceOf(SocialPost::class, $saved);
+        self::assertSame('repurpose-nord.mp4', $saved->spec['video']);
+
+        $this->postJson('/admin/repurpose/studio/'.$post->id.'/save', $this->validSpec());
+        self::assertResponseIsSuccessful();
+        $saved = $this->em->find(SocialPost::class, $post->id);
+        self::assertInstanceOf(SocialPost::class, $saved);
+        self::assertArrayNotHasKey('video', $saved->spec);
+    }
+
+    public function testPreviewDoesNotExposeMissingOrNonVideoMedia(): void
+    {
+        $post = $this->persistPost();
+        $impostor = new Media()->setFileName('studio-image.mp4')->setMimeType('image/jpeg')->setHash('studio-image');
+        $this->em->persist($impostor);
+        $this->em->flush();
+
+        try {
+            foreach ([null, 'absent-video.mp4', 'studio-image.mp4'] as $video) {
+                $body = $this->postJson('/admin/repurpose/studio/'.$post->id.'/preview', [...$this->validSpec(), 'video' => $video]);
+                self::assertResponseIsSuccessful();
+                self::assertNull($body['video']);
+                self::assertIsArray($body['slides']);
+                self::assertCount(1, $body['slides']);
+            }
+        } finally {
+            $stored = $this->em->find(Media::class, $impostor->id);
+            if (null !== $stored) {
+                $this->em->remove($stored);
+            }
+
+            $this->em->flush();
+        }
+    }
+
     public function testSavePinsNetworkButAllowsRelinkingThePage(): void
     {
         $post = $this->persistPost();
@@ -192,6 +289,8 @@ final class RepurposeStudioControllerTest extends WebTestCase
 
         self::assertResponseIsSuccessful();
         self::assertSame($before, $this->em->getRepository(SocialPost::class)->count([]));
+        self::assertSelectorExists('main.pw-confirmation button[type="submit"]');
+        self::assertSelectorExists('main.pw-confirmation a[href="/admin"]');
 
         $this->client->submitForm('Create carousel');
 
@@ -226,6 +325,7 @@ final class RepurposeStudioControllerTest extends WebTestCase
 
             self::assertResponseIsSuccessful();
             self::assertSame($before, $this->em->getRepository(SocialPost::class)->count([]));
+            self::assertSelectorExists('main.pw-confirmation a[href$="/page/'.$page->id.'/edit"]');
         } finally {
             $this->em->remove($page);
             $this->em->flush();
@@ -315,6 +415,7 @@ final class RepurposeStudioControllerTest extends WebTestCase
         $this->client->request(Request::METHOD_GET, '/admin/repurpose/studio/'.$post->id.'/network/instagram');
 
         self::assertResponseIsSuccessful();
+        self::assertSelectorExists('main.pw-confirmation a[href="/admin/repurpose/studio/'.$post->id.'"]');
         self::assertNull($this->em->getRepository(SocialPost::class)
             ->findOneBy(['host' => self::HOST, 'page' => 'blog/studio-article', 'network' => 'instagram']));
 
@@ -585,11 +686,12 @@ final class RepurposeStudioControllerTest extends WebTestCase
         return 'data:image/png;base64,'.base64_encode($bytes);
     }
 
-    private function persistPost(): SocialPost
+    /** @param array<string, mixed>|null $spec */
+    private function persistPost(?array $spec = null): SocialPost
     {
         $post = new SocialPost();
         $post->host = self::HOST;
-        $post->spec = $this->validSpec();
+        $post->spec = $spec ?? $this->validSpec();
 
         $this->em->persist($post);
         $this->em->flush();
