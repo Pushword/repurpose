@@ -41,16 +41,30 @@ repurposeAudioVoiceEmpty: "No voice recording selected"
 repurposeAudioVoiceHint: "Plays once, from the start of the video."
 repurposeAudioVolume: "Volume"
 repurposeConfirmationCancel: Cancel
+repurposeEditSourcePage: Edit source page
 repurposeExport: 'Export'
 repurposeFormat: 'Format'
 repurposeHelpEffect: "Applies to the whole deck. Each slide can override this effect."
 repurposeHelpPalette: "Overrides the deck background for this slide. Leave empty to inherit."
 repurposeHelpPreview: "100% is the typical mobile feed width for the selected network. Zoom changes the preview only."
 repurposeHelpSource: "JSON is validated as you type. The visual editor and source stay in sync when you switch."
+repurposeLinkedCarouselsCount: 'Linked carousels (%count%)'
+repurposeListCarousel: Carousel
+repurposeListClose: Close
+repurposeListCoverLabel: 'Cover of %page% · %network%'
+repurposeListNoCover: No slides
+repurposeListOpenStudio: Open in Studio
+repurposeListPreview: Preview
+repurposeListPreviewLabel: 'Preview the cover of %page% · %network%'
+repurposeListStandalone: Standalone carousel
+repurposeListUntitled: Untitled carousel
 repurposeNetwork: 'Network'
 repurposePreviewMode: 'Preview'
 repurposePreviewSlides: 'Slides'
 repurposePublishingTarget: 'Publishing target'
+repurposeSourcePage: Source page
+repurposeSourcePublication: Publication
+repurposeSourceUnpublished: Not published
 repurposeStatusDraft: Draft
 repurposeStatusPlanned: Planned
 repurposeStatusPosted: Posted
