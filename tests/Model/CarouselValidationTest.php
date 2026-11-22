@@ -37,7 +37,7 @@ final class CarouselValidationTest extends KernelTestCase
             'page' => 'blog/mon-article',
             'network' => 'linkedin',
             'format' => 'linkedin-4-5',
-            'slides' => [['title' => 'Hello', 'image' => ['media' => 'photo.jpg']]],
+            'slides' => [['title' => 'Hello', 'image' => ['media' => '1.jpg']]],
         ]);
 
         self::assertSame([], $violations);
@@ -157,17 +157,78 @@ final class CarouselValidationTest extends KernelTestCase
         // `images[0]`, so the violation surfaces there (proving back-compat too).
         $violations = $this->violations([
             'page' => 'x', 'network' => 'linkedin', 'format' => 'linkedin-4-5',
-            'slides' => [['title' => 'Hi', 'image' => ['media' => 'p.jpg', 'focusX' => 2]]],
+            'slides' => [['title' => 'Hi', 'image' => ['media' => '1.jpg', 'focusX' => 2]]],
         ]);
 
         self::assertArrayHasKey('slides[0].images[0].focusX', $violations);
+    }
+
+    /**
+     * The renderer paints anything it cannot embed as a flat grey placeholder, so
+     * a typo, a video or an SVG must fail validation instead of exporting grey.
+     */
+    public function testSlideImageMustBeARasterImageOfTheMediaLibrary(): void
+    {
+        foreach (['typo.jpg', 'repurpose-nord.mp4', 'logo.svg'] as $media) {
+            $violations = $this->violations([
+                'page' => 'x', 'network' => 'linkedin', 'format' => 'linkedin-4-5',
+                'slides' => [['title' => 'Hi', 'images' => [['media' => '1.jpg'], ['media' => $media]], 'imageLayout' => 'split-v']],
+            ]);
+
+            self::assertSame(['slides[0].images[1].media' => 'No image named "'.$media.'" in the media library (JPEG, PNG, GIF or WebP).'], $violations);
+        }
+    }
+
+    public function testCustomFontPairingOfInstalledFamiliesPasses(): void
+    {
+        self::assertSame([], $this->violations([
+            'page' => 'x', 'network' => 'linkedin', 'format' => 'linkedin-4-5',
+            'fontPairing' => ['heading' => 'Poppins', 'body' => 'Inter'],
+            'slides' => [['title' => 'Hi']],
+        ]));
+    }
+
+    /**
+     * The renderer would silently fall back to Roboto; validation names the
+     * family and the command that installs it instead.
+     */
+    public function testAFontNotInstalledIsRejectedWithItsInstallCommand(): void
+    {
+        $spec = ['page' => 'x', 'network' => 'linkedin', 'format' => 'linkedin-4-5', 'slides' => [['title' => 'Hi']]];
+
+        self::assertSame([
+            'fontPairing.heading' => 'Font "Gabarito" (weight 700) is not installed. Check the Google Fonts family name, or install it with: bin/console pw:repurpose:fonts --heading="Gabarito"',
+            'fontPairing.body' => 'Font "Poppins" (weight 400) is not installed. Check the Google Fonts family name, or install it with: bin/console pw:repurpose:fonts --body="Poppins"',
+        ], $this->violations([...$spec, 'fontPairing' => ['heading' => 'Gabarito', 'body' => 'Poppins']]));
+
+        // A registry pairing too; both its faces report at `fontPairing`, so the
+        // path => message map keeps the body's.
+        self::assertSame(
+            ['fontPairing' => 'Font "Questrial" (weight 400) is not installed. Check the Google Fonts family name, or install it with: bin/console pw:repurpose:fonts --body="Questrial"'],
+            $this->violations([...$spec, 'fontPairing' => 'rozha-one-questrial']),
+        );
+    }
+
+    public function testMalformedFontPairingsAreRejected(): void
+    {
+        $spec = ['page' => 'x', 'network' => 'linkedin', 'format' => 'linkedin-4-5', 'slides' => [['title' => 'Hi']]];
+
+        self::assertSame(['fontPairing' => 'Unknown font pairing.'], $this->violations([...$spec, 'fontPairing' => 'no-such-pairing']));
+        self::assertSame(
+            ['fontPairing.heading' => 'A font family name holds only letters, digits and spaces, as on Google Fonts.'],
+            $this->violations([...$spec, 'fontPairing' => ['heading' => 'Bad/Name', 'body' => 'Inter']]),
+        );
+        self::assertSame(
+            ['fontPairing.body' => 'A custom font pairing needs both a heading and a body family.'],
+            $this->violations([...$spec, 'fontPairing' => ['heading' => 'Poppins']]),
+        );
     }
 
     public function testSplitLayoutNeedsTwoImages(): void
     {
         $violations = $this->violations([
             'page' => 'x', 'network' => 'linkedin', 'format' => 'linkedin-4-5',
-            'slides' => [['title' => 'Split', 'imageLayout' => 'split-v', 'images' => [['media' => 'top.jpg']]]],
+            'slides' => [['title' => 'Split', 'imageLayout' => 'split-v', 'images' => [['media' => '1.jpg']]]],
         ]);
 
         self::assertArrayHasKey('slides[0].images', $violations);
@@ -177,7 +238,7 @@ final class CarouselValidationTest extends KernelTestCase
     {
         $violations = $this->violations([
             'page' => 'x', 'network' => 'linkedin', 'format' => 'linkedin-4-5',
-            'slides' => [['title' => 'Split', 'imageLayout' => 'split-h', 'images' => [['media' => 'left.jpg'], ['media' => 'right.jpg']]]],
+            'slides' => [['title' => 'Split', 'imageLayout' => 'split-h', 'images' => [['media' => '1.jpg'], ['media' => '2.jpg']]]],
         ]);
 
         self::assertSame([], $violations);
@@ -186,7 +247,7 @@ final class CarouselValidationTest extends KernelTestCase
     public function testTooManySlidesForNetworkIsRejected(): void
     {
         // An organic Pinterest image Pin contains one visual.
-        $slides = array_fill(0, 2, ['title' => 'Hi', 'image' => ['media' => 'p.jpg']]);
+        $slides = array_fill(0, 2, ['title' => 'Hi', 'image' => ['media' => '1.jpg']]);
         $violations = $this->violations([
             'page' => 'x', 'network' => 'pinterest', 'format' => 'pinterest-2-3',
             'caption' => 'A useful Pin description.',
@@ -253,7 +314,7 @@ final class CarouselValidationTest extends KernelTestCase
     {
         // 12 LinkedIn slides breaks the "ideally under 10" *guidance* but no hard
         // limit (cap is 300 pages) — the validator must stay silent.
-        $slides = array_fill(0, 12, ['title' => 'Hi', 'image' => ['media' => 'p.jpg']]);
+        $slides = array_fill(0, 12, ['title' => 'Hi', 'image' => ['media' => '1.jpg']]);
         $violations = $this->violations([
             'page' => 'x', 'network' => 'linkedin', 'format' => 'linkedin-4-5',
             'slides' => $slides,

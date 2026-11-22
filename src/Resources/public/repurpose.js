@@ -142,6 +142,7 @@
 
     dropEmptyObject(s, 'palette')
     dropEmptyObject(s, 'counter')
+    dropEmptyObject(s, 'fontPairing')
     if (Array.isArray(s.hashtags) && 0 === s.hashtags.length) {
       delete s.hashtags
     }
@@ -228,6 +229,7 @@
       view: 'visual',
       live: { state: 'ok', text: 'in sync' },
       violations: [],
+      warnings: [],
       slidesOpen: [],
       deckOpen: true,
       dragIndex: null,
@@ -434,9 +436,11 @@
             this.selectedVideo = spec.video || ''
             this.slides = body.slides
             this.violations = []
+            this.warnings = Array.isArray(body.warnings) ? body.warnings : []
             this.live = { state: 'ok', text: 'preview live' }
           } else if (body && Array.isArray(body.violations)) {
             this.violations = body.violations
+            this.warnings = []
             this.live = { state: 'bad', text: body.violations.length + ' issue(s)' }
           } else {
             this.live = { state: 'bad', text: (body && body.error) || 'preview failed' }
@@ -616,6 +620,17 @@
       },
       pickAudio: function (track, mode) {
         this.pickMedia('audio', track, mode)
+      },
+      fontPairingChoice: function () {
+        var pairing = this.spec.fontPairing
+        return pairing && 'object' === typeof pairing ? 'custom' : (pairing || '')
+      },
+      chooseFontPairing: function (value) {
+        this.spec.fontPairing = 'custom' === value ? { heading: '', body: '' } : value
+      },
+      // Options rendered by x-for exist only after this tick.
+      syncSelect: function (el, value) {
+        this.$nextTick(function () { el.value = value })
       },
       clearVideo: function () {
         this.spec.video = ''

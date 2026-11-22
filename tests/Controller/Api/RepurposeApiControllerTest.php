@@ -8,8 +8,12 @@ use Override;
 use PHPUnit\Framework\Attributes\Group;
 use Pushword\Core\Entity\User;
 use Pushword\Repurpose\Entity\SocialPost;
+use Pushword\Repurpose\Model\FontPairing;
+use Pushword\Repurpose\Service\FontResolver;
+use Pushword\Repurpose\Tests\GoogleFontsMock;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
+use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -125,6 +129,29 @@ final class RepurposeApiControllerTest extends WebTestCase
         self::assertSame(Response::HTTP_NOT_FOUND, $this->client->getResponse()->getStatusCode());
     }
 
+    public function testValidateAndUpsertDownloadTheFamiliesOfACustomFontPairing(): void
+    {
+        $google = new GoogleFontsMock();
+        self::getContainer()->set('http_client', $google->client());
+        $fonts = self::getContainer()->get(FontResolver::class);
+        $spec = [...$this->validSpec(), 'fontPairing' => ['heading' => 'Gabarito', 'body' => 'Poppins']];
+
+        try {
+            $result = $this->requestJson('POST', '/api/repurpose/validate', $spec);
+            self::assertTrue($result['valid'] ?? null);
+            self::assertTrue($fonts->isInstalled(new FontPairing('Gabarito', 'Poppins')));
+            self::assertCount(4, $google->takeRequests());
+
+            $spec['fontPairing'] = ['heading' => 'Gabarito', 'body' => 'Lato'];
+            $this->requestJson('PUT', '/api/repurpose/'.self::HOST.'/linkedin/'.self::PAGE, $spec);
+            self::assertContains($this->client->getResponse()->getStatusCode(), [Response::HTTP_OK, Response::HTTP_CREATED]);
+            self::assertTrue($fonts->hasFace('Lato', 400));
+            self::assertCount(2, $google->takeRequests(), 'Lato only: Gabarito was not fetched again');
+        } finally {
+            new Filesystem()->remove($fonts->installDir());
+        }
+    }
+
     public function testValidateWarnsOnUnreadableContrastWithoutBlocking(): void
     {
         $spec = $this->validSpec();
@@ -141,7 +168,7 @@ final class RepurposeApiControllerTest extends WebTestCase
         self::assertNotEmpty($warnings);
         $first = $warnings[0];
         self::assertIsArray($first);
-        self::assertSame('slides[0]', $first['path']);
+        self::assertSame('slides[0].title', $first['path']);
     }
 
     /**
@@ -307,7 +334,7 @@ final class RepurposeApiControllerTest extends WebTestCase
 
         // Reframe: PATCH the same key with a new zoom, confirm it persisted.
         $reframed = $this->validSpec();
-        $reframed['slides'] = [['title' => 'Hello', 'image' => ['media' => 'photo.jpg', 'zoom' => 1.8]]];
+        $reframed['slides'] = [['title' => 'Hello', 'image' => ['media' => '1.jpg', 'zoom' => 1.8]]];
         $this->requestJson('PATCH', $url, $reframed);
         self::assertSame(Response::HTTP_OK, $this->client->getResponse()->getStatusCode());
 
@@ -351,7 +378,7 @@ final class RepurposeApiControllerTest extends WebTestCase
             'network' => 'linkedin',
             'format' => 'linkedin-4-5',
             'slides' => [
-                ['title' => 'Hello', 'image' => ['media' => 'photo.jpg', 'zoom' => 1.1]],
+                ['title' => 'Hello', 'image' => ['media' => '1.jpg', 'zoom' => 1.1]],
             ],
         ];
     }
