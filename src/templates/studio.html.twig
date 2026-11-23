@@ -95,17 +95,23 @@
     .deck::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 999px; }
     .slide { flex: 0 0 auto; scroll-snap-align: start; }
     .slide figure { margin: 0; }
-    .slide svg { display: block; width: var(--rp-slide-w, {{ feedWidth }}px); height: auto; border-radius: 14px; box-shadow: 0 6px 24px #0000001f; border: 1px solid var(--line); transition: transform .18s, box-shadow .18s; }
+    .slide-canvas { position: relative; transition: transform .18s; }
+    .slide svg { display: block; width: var(--rp-slide-w, {{ feedWidth }}px); height: auto; border-radius: 14px; box-shadow: 0 6px 24px #0000001f; border: 1px solid var(--line); transition: box-shadow .18s; }
     .deck-note { display: flex; align-items: center; gap: .6rem; margin: .1rem 0 0 .25rem; font-size: .72rem; color: var(--muted); }
     .deck-note span { flex: 1; }
     .deck-note input[type=range] { width: 8rem; flex: 0 0 auto; }
-    .slide figure:hover svg { transform: translateY(-3px); box-shadow: 0 12px 32px #0000002e; }
+    .slide figure:hover .slide-canvas { transform: translateY(-3px); }
+    .slide figure:hover svg { box-shadow: 0 12px 32px #0000002e; }
     .slide figcaption { text-align: center; color: var(--muted); font-size: .72rem; margin-top: .5rem; font-variant-numeric: tabular-nums; }
     /* Text blocks are click-to-edit and drag-to-move (the renderer tags them with
        data-rp-edit); dragging a stack field converts it into a free text box. */
     .slide svg g[data-rp-edit] { cursor: grab; touch-action: none; }
     .slide svg g[data-rp-edit]:hover { opacity: .82; }
     .slide svg g[data-rp-edit]:active { cursor: grabbing; }
+    .slide-guides { position: absolute; inset: 1px; overflow: hidden; border-radius: 13px; pointer-events: none; color: oklch(0.82 0.15 215); filter: drop-shadow(0 0 1px oklch(0.26 0.04 230)); }
+    .slide-guides span { position: absolute; }
+    .slide-guide-left { inset-block: 0; border-left: 1px dashed; }
+    .slide-guide-top { inset-inline: 0; border-top: 1px dashed; }
 
     /* Floating inline text editor, opened by clicking a text block on a slide. */
     .text-pop { position: fixed; z-index: 60; width: 19rem; background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; box-shadow: 0 12px 40px #00000026; padding: .7rem; display: flex; flex-direction: column; gap: .35rem; }
@@ -209,6 +215,10 @@
     .notice { display: flex; align-items: flex-start; gap: .5rem; font-size: .74rem; color: var(--warn); background: #fef3c7; border: 1px solid #fde68a; border-radius: 8px; padding: .55rem .65rem; line-height: 1.4; }
     .notice span { flex: 1; }
     .notice .icon-btn { flex: 0 0 auto; width: 1.5rem; height: 1.5rem; }
+    .has-sync-notice { flex-wrap: wrap; }
+    .has-sync-notice + .layout .deck-wrap { position: static; }
+    .studio-sync { flex: 1 0 100%; flex-wrap: wrap; align-items: center; font-size: .82rem; }
+    .studio-sync > span { min-width: min(100%, 19rem); }
 
     .actions { display: flex; gap: .6rem; }
     .actions .btn { flex: 1; }
@@ -330,10 +340,11 @@
     }
   </style>
 </head>
-<body x-data="repurposeStudio()">
+<body x-data="repurposeStudio()" x-on:focus.window="checkRevision()" x-on:visibilitychange.document="checkRevision()">
   <script>
     window.RP_STUDIO = {
       spec: {{ specJs|raw }},
+      revision: {{ post.revision()|json_encode|raw }},
       slides: {{ slidesJs|raw }},
       video: {{ videoJs|raw }},
       messages: {
@@ -357,6 +368,7 @@
       networkUrls: {{ networkUrlsJs|raw }},
       urls: {
         preview: {{ path('repurpose_studio_preview', {id: post.id})|json_encode|raw }},
+        revision: {{ path('repurpose_studio_revision', {id: post.id})|json_encode|raw }},
         save: {{ path('repurpose_studio_save', {id: post.id})|json_encode|raw }},
         export: {{ path('repurpose_studio_export', {id: post.id})|json_encode|raw }},
         exportVideo: {{ path('repurpose_studio_export_video', {id: post.id})|json_encode|raw }},
@@ -369,7 +381,7 @@
     }
   </script>
 
-  <header>
+  <header x-bind:class="{ 'has-sync-notice': syncState }">
     <div class="studio-context">
       <a class="back" href="{{ backUrl }}">← Back</a>
       <h1>Repurpose Studio</h1>
@@ -391,7 +403,16 @@
           <button class="btn" type="button" x-show="network === 'pinterest'" x-cloak @click="pinToPinterest()" :disabled="pinning" x-text="pinLabel">📌 Pin to Pinterest</button>
         </div>
       </details>
-      <button class="btn primary studio-save" type="button" @click="save()" :disabled="saving" x-text="saveLabel">Save</button>
+      <button class="btn primary studio-save" type="button" @click="save()" :disabled="saving || syncState !== ''" x-text="saveLabel">Save</button>
+    </div>
+    <div class="notice studio-sync" x-show="syncState" x-cloak>
+      <span role="alert">
+        <span x-show="syncState === 'changed'">{{ 'repurposeSyncChanged'|trans }}</span>
+        <span x-show="syncState === 'deleted'">{{ 'repurposeSyncDeleted'|trans }}</span>
+        <span x-show="dirty">{{ 'repurposeSyncDraft'|trans }}</span>
+      </span>
+      <a class="btn" x-show="syncState === 'changed' && dirty" href="{{ path('repurpose_studio', {id: post.id}) }}" target="_blank" rel="noopener">{{ 'repurposeSyncOpenLatest'|trans }}</a>
+      <button class="btn" type="button" x-show="syncState === 'changed' && !dirty" x-on:click="window.location.reload()">{{ 'repurposeSyncReload'|trans }}</button>
     </div>
   </header>
 
@@ -436,7 +457,7 @@
           <template x-for="(svg, i) in slides" :key="i">
             <div class="slide" @pointerenter="hoverSlide(i)" @pointerleave="hoverSlideLeave()">
               <figure>
-                <div x-html="svg" @click="deckTextClick(i, $event)" @pointerdown="deckTextDown(i, $event)"></div>
+                <div class="slide-canvas" x-html="svg" @click="deckTextClick(i, $event)" @pointerdown="deckTextDown(i, $event)"></div>
                 <figcaption>Slide <span x-text="i + 1"></span> / <span x-text="slides.length"></span></figcaption>
               </figure>
             </div>

@@ -12,13 +12,160 @@ function studio(config = {}, fetch, confirm, globals = {}) {
     urls: {mediaIndex: '/admin/media', mediaUpload: '/admin/media/new'},
     messages: {videoInvalid: 'Choose a video', audioInvalid: 'Choose audio'},
     ...config,
-  }, Alpine: {data: (_, value) => { factory = value; }}};
+  }, Alpine: {data: (_, value) => { factory = value; }}, addEventListener() {}, removeEventListener() {}};
   vm.runInNewContext(source, {window, fetch, document: {addEventListener: (_, callback) => callback()}, ...globals});
   return factory();
 }
 function selection(fileName, eventOrigin = origin) {
   return {origin: eventOrigin, data: {type: 'pw-media-picker-select', media: {fileName}}};
 }
+
+test('a revision check detects another save while keeping the local draft intact', async () => {
+  let current = '"1-1"';
+  const requests = [];
+  const state = studio({revision: current, urls: {revision: '/revision', save: '/save'}}, async url => {
+    requests.push(url);
+    return {ok: true, json: async () => ({revision: current})};
+  });
+
+  await state.checkRevision();
+  assert.equal(state.syncState, '');
+  state.spec.slides[0].title = 'Local edit';
+  state.dirty = true;
+  current = '"1-2"';
+  await state.checkRevision();
+  assert.equal(state.syncState, 'changed');
+  assert.equal(state.revision, '"1-1"');
+  assert.equal(state.spec.slides[0].title, 'Local edit');
+  assert.equal(state.dirty, true);
+  await state.save();
+  assert.deepEqual(requests, ['/revision', '/revision'], 'a stale tab cannot submit another save');
+});
+
+test('a revision check retries after a network error and detects a deleted carousel', async () => {
+  const requests = [];
+  const state = studio({revision: '"1-1"', urls: {revision: '/revision', save: '/save'}}, async url => {
+    requests.push(url);
+    if (requests.length === 1) {
+      throw new TypeError('Network error');
+    }
+    return {ok: false, status: 404};
+  });
+  state.spec.slides[0].title = 'Local edit';
+  state.dirty = true;
+  await state.checkRevision();
+  assert.equal(state.syncState, '');
+  await state.checkRevision();
+  assert.equal(state.syncState, 'deleted');
+  assert.equal(state.spec.slides[0].title, 'Local edit');
+  assert.equal(state.dirty, true);
+  await state.save();
+  assert.deepEqual(requests, ['/revision', '/revision']);
+});
+
+for (const [status, syncState] of [[409, 'changed'], [404, 'deleted']]) {
+  test(`save returning ${status} leaves the local draft available`, async () => {
+    const revision = '"1-1"';
+    const state = studio({revision, urls: {save: '/save'}}, async (url, options) => {
+      assert.equal(url, '/save');
+      assert.equal(options.headers['If-Match'], revision);
+      assert.equal(JSON.parse(options.body).slides[0].title, 'Local edit');
+      return {status};
+    }, undefined, {setTimeout() {}});
+
+    state.spec.slides[0].title = 'Local edit';
+    state.dirty = true;
+    await state.save();
+    assert.equal(state.syncState, syncState);
+    assert.equal(state.revision, revision);
+    assert.equal(state.spec.slides[0].title, 'Local edit');
+    assert.equal(state.dirty, true);
+  });
+}
+
+test('a successful save keeps edits typed during the request and ignores an older revision check', async () => {
+  let resolveCheck;
+  let resolveSave;
+  const state = studio({revision: '"1-1"', urls: {revision: '/revision', save: '/save'}}, url => {
+    if (url === '/revision') {
+      return new Promise(resolve => { resolveCheck = resolve; });
+    }
+    return new Promise(resolve => { resolveSave = resolve; });
+  }, undefined, {setTimeout() {}});
+
+  const check = state.checkRevision();
+  const save = state.save();
+  state.spec.slides[0].title = 'Typed during save';
+  resolveSave({ok: true, json: async () => ({revision: '"1-2"'})});
+  await save;
+  resolveCheck({ok: true, json: async () => ({revision: '"1-1"'})});
+  await check;
+
+  assert.equal(state.syncState, '');
+  assert.equal(state.revision, '"1-2"');
+  assert.equal(state.spec.slides[0].title, 'Typed during save');
+  assert.equal(state.dirty, true);
+});
+
+test('slide guides mark peer edges and centers until the drag ends', async () => {
+  const moved = {content: 'Move this', x: 0.1, y: 0.2, width: 0.3};
+  const preview = ['<svg/>'];
+  let overlay;
+  const state = studio({spec: {slides: [{texts: [moved]}]}},
+    async () => ({ok: true, json: async () => ({slides: preview})}), undefined, {
+      document: {
+        addEventListener: (_, callback) => callback(),
+        createElement: () => ({style: {}, lines: [], setAttribute() {},
+          append(line) { this.lines.push(line); }, remove() { overlay = undefined; }}),
+      },
+      performance: {now: () => 1000},
+    });
+  state.$nextTick = () => {};
+  let transform;
+  const block = {
+    getAttribute: () => 'texts.0',
+    getBBox: () => assert.fail('the dragged block must not contribute guides'),
+    setAttribute: (_, value) => { transform = value; },
+    removeAttribute: () => { transform = undefined; },
+    ownerSVGElement: {
+      viewBox: {baseVal: {x: 0, y: 0, width: 1000, height: 500}},
+      getBoundingClientRect: () => ({width: 500, height: 250}),
+      querySelectorAll: () => [block,
+        {getBBox: () => ({x: 200, y: 100, width: 400, height: 200})},
+        {getBBox: () => ({x: 0, y: 0, width: 1000, height: 200})}],
+      after: element => { overlay = element; },
+    },
+  };
+  const start = {target: {closest: () => block}, button: 0, pointerId: 1, clientX: 100, clientY: 100, preventDefault() {}};
+  const move = {pointerId: 1, clientX: 127, clientY: 115};
+  state.deckTextDown(0, start);
+  state.deckTextMove({...move, clientX: 102, clientY: 100});
+  assert.equal(overlay, undefined, 'clicks do not display guides');
+  state.deckTextMove(move);
+  assert.ok(overlay, 'the guides are visible after moving');
+  assert.deepEqual(overlay.lines.map(line => line.style.left).filter(Boolean).sort(), ['20%', '40%', '50%', '60%']);
+  assert.deepEqual(overlay.lines.map(line => line.style.top).filter(Boolean).sort(), ['20%', '40%', '60%']);
+  assert.equal(transform, 'translate(54.0 30.0)');
+  state.deckTextDown(0, {...start, pointerId: 2});
+  state.deckTextMove({...move, pointerId: 2, clientX: 150});
+  state.deckTextUp({pointerId: 2});
+  assert.ok(overlay, 'a second pointer must not end the first drag');
+  assert.equal(transform, 'translate(54.0 30.0)');
+  await state.preview();
+  assert.notEqual(state.slides, preview, 'a pending preview must not replace the slide during the drag');
+  state.deckTextCancel({pointerId: 1});
+  assert.equal(state.slides, preview);
+  assert.equal(overlay, undefined);
+  assert.equal(transform, undefined);
+  assert.equal(state.spec.slides[0].texts[0].x, 0.1);
+
+  state.deckTextDown(0, start);
+  state.deckTextMove(move);
+  state.deckTextUp({pointerId: 1});
+  assert.equal(overlay, undefined);
+  assert.equal(state.spec.slides[0].texts[0].x, 0.154);
+  assert.equal(state.spec.slides[0].texts[0].y, 0.26);
+});
 
 test('audio errors stay attached to the exact track and field and clear after validation', () => {
   const state = studio();
