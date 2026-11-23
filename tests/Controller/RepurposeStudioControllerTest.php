@@ -14,6 +14,7 @@ use Pushword\Core\Entity\Page;
 use Pushword\Core\Entity\User;
 use Pushword\Core\Tests\PathTrait;
 use Pushword\Repurpose\Entity\SocialPost;
+use Pushword\Repurpose\Entity\SocialPostRevision;
 use Pushword\Repurpose\Model\FontPairing;
 use Pushword\Repurpose\Service\AudioAssetResolver;
 use Pushword\Repurpose\Service\CarouselFactory;
@@ -103,6 +104,97 @@ final class RepurposeStudioControllerTest extends WebTestCase
         parent::tearDown();
     }
 
+    public function testClassicStudioSeesCollaborativeModeBeforeAnyEdit(): void
+    {
+        $post = $this->persistPost();
+        $studioUrl = '/admin/repurpose/studio/'.$post->id;
+        $this->client->request(Request::METHOD_GET, $studioUrl);
+        $html = (string) $this->client->getResponse()->getContent();
+        self::assertSame(1, preg_match('/draftToken: "([^"]+)"/', $html, $matches));
+        $tab = bin2hex(random_bytes(16));
+        $headers = ['HTTP_X_COLLABORATION_TOKEN' => $matches[1], 'HTTP_X_COLLABORATION_TAB' => $tab];
+
+        $this->client->request(Request::METHOD_GET, $studioUrl.'/revision');
+        self::assertSame(['revision' => $post->revision(), 'collaborative' => false], $this->readJson());
+        $this->client->jsonRequest(Request::METHOD_POST, $studioUrl.'/draft', ['after' => 0], $headers);
+        self::assertResponseIsSuccessful();
+        $this->client->request(Request::METHOD_GET, $studioUrl.'/revision');
+        self::assertSame(['revision' => $post->revision(), 'collaborative' => true], $this->readJson());
+        $this->client->request(Request::METHOD_DELETE, $studioUrl.'/draft', server: ['HTTP_X_COLLABORATION_TAB' => $tab]);
+        self::assertResponseStatusCodeSame(403);
+        $this->client->request(Request::METHOD_DELETE, $studioUrl.'/draft', server: $headers);
+        self::assertResponseStatusCodeSame(204);
+        $this->client->request(Request::METHOD_GET, $studioUrl.'/revision');
+        self::assertSame(['revision' => $post->revision(), 'collaborative' => false], $this->readJson());
+    }
+
+    public function testStudioAndAgentAutosaveTheSameCarouselWithGroupedHistory(): void
+    {
+        $post = $this->persistPost();
+        $revision = $post->revision();
+        $browserUrl = '/admin/repurpose/studio/'.$post->id.'/draft';
+        $apiUrl = '/api/repurpose/'.$post->id.'/draft';
+        $this->client->request(Request::METHOD_GET, '/admin/repurpose/studio/'.$post->id);
+        $html = (string) $this->client->getResponse()->getContent();
+        self::assertSame(1, preg_match('/draftToken: "([^"]+)"/', $html, $matches));
+        $browser = ['HTTP_X_COLLABORATION_TOKEN' => $matches[1], 'HTTP_IF_MATCH' => $revision];
+        $agent = ['HTTP_AUTHORIZATION' => 'Bearer '.$this->testToken];
+
+        $this->client->jsonRequest(Request::METHOD_POST, $browserUrl, ['after' => 0]);
+        self::assertResponseStatusCodeSame(403);
+        $this->client->jsonRequest(Request::METHOD_POST, $apiUrl, ['after' => 0]);
+        self::assertResponseStatusCodeSame(401);
+        $this->client->jsonRequest(Request::METHOD_POST, $browserUrl, ['after' => 0], $browser);
+        self::assertResponseIsSuccessful();
+        $room = $this->readJson()['room'];
+        self::assertIsString($room);
+
+        /** @var array{carousel: array<string, array{snapshot: string, content: array<string, mixed>}>} $fixture */
+        $fixture = json_decode(new Filesystem()->readFile(\dirname(__DIR__, 3).'/core/tests/Collaboration/fixtures/live-editing.json'), true, flags: \JSON_THROW_ON_ERROR);
+        $scenarios = $fixture['carousel'];
+        $edit = static fn (int $after, string $name): array => [
+            'room' => $room, 'after' => $after, 'snapshot' => $scenarios[$name]['snapshot'],
+            'content' => json_encode($scenarios[$name]['content'], \JSON_THROW_ON_ERROR),
+        ];
+
+        $this->client->jsonRequest(Request::METHOD_POST, $browserUrl, $edit(0, 'studio'), $browser);
+        self::assertResponseIsSuccessful();
+        self::assertTrue($this->readJson()['accepted']);
+
+        $this->client->jsonRequest(Request::METHOD_POST, $browserUrl, ['after' => 0], $browser);
+        self::assertResponseIsSuccessful();
+        self::assertIsArray($this->readJson()['anchor']);
+        self::assertSame($scenarios['studio']['snapshot'], $this->readJson()['snapshot']);
+        self::assertSame($room, $this->readJson()['room']);
+
+        $this->client->jsonRequest(Request::METHOD_POST, $apiUrl, $edit(1, 'invalid'), $agent);
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame('invalid_content', $this->readJson()['error']);
+        $this->client->jsonRequest(Request::METHOD_POST, $apiUrl, [
+            ...$edit(1, 'agent'), 'content' => '[]',
+        ], $agent);
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame('invalid_snapshot', $this->readJson()['error']);
+        $this->client->jsonRequest(Request::METHOD_POST, $apiUrl, $edit(1, 'network'), $agent);
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame('invalid_content', $this->readJson()['error']);
+
+        $this->persistPost([...$post->spec, 'page' => 'blog/live-collision']);
+        $this->client->jsonRequest(Request::METHOD_POST, $apiUrl, $edit(1, 'collision'), $agent);
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame([['path' => 'page', 'message' => 'A carousel already exists for this page on this network.']], $this->readJson()['violations']);
+
+        $this->client->jsonRequest(Request::METHOD_POST, $apiUrl, $edit(1, 'agent'), $agent);
+        self::assertResponseIsSuccessful();
+        self::assertTrue($this->readJson()['accepted']);
+        $saved = $this->em->find(SocialPost::class, $post->id);
+        self::assertInstanceOf(SocialPost::class, $saved);
+        $this->em->refresh($saved);
+        self::assertEquals($scenarios['agent']['content'], $saved->spec);
+        self::assertSame(3, $saved->version);
+        self::assertSame(1, $this->em->getRepository(SocialPostRevision::class)->count(['post' => $post->id]));
+    }
+
     public function testStudioRendersTheEditorShell(): void
     {
         $post = $this->persistPost();
@@ -127,6 +219,7 @@ final class RepurposeStudioControllerTest extends WebTestCase
         // The free-text editor's font choices and the zoom slider's base width.
         self::assertStringContainsString('"textFonts":["body","heading"]', $html);
         self::assertStringContainsString('feedWidth: 390', $html);
+        self::assertStringContainsString('slideLimit: 300', $html);
         self::assertStringContainsString('"linkedin-4-5":"4:5 · 1080 × 1350 px"', $html);
         self::assertStringContainsString('— brand —', $html);
         // Deck interactions: drag-to-move free texts, wheel-adjustable sliders,
@@ -273,6 +366,7 @@ final class RepurposeStudioControllerTest extends WebTestCase
         self::assertSelectorExists('#rp-slide-preview');
         self::assertSelectorExists('#rp-video-preview video[controls][playsinline]');
         self::assertStringContainsString($filename, (string) $this->client->getResponse()->getContent());
+        self::assertStringContainsString('slideLimit: 20', (string) $this->client->getResponse()->getContent());
 
         $body = $this->postJson('/admin/repurpose/studio/'.$post->id.'/preview', $post->spec);
         self::assertResponseIsSuccessful();
@@ -914,6 +1008,15 @@ final class RepurposeStudioControllerTest extends WebTestCase
         } finally {
             new Filesystem()->remove($fonts->installDir());
         }
+    }
+
+    /** @return array<array-key, mixed> */
+    private function readJson(): array
+    {
+        $payload = json_decode((string) $this->client->getResponse()->getContent(), true);
+        self::assertIsArray($payload);
+
+        return $payload;
     }
 
     /** @param array<string, mixed>|null $spec */

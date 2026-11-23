@@ -12,6 +12,7 @@ use Pushword\Api\Controller\AbstractApiController;
 use Pushword\Repurpose\Entity\SocialPost;
 use Pushword\Repurpose\Repository\SocialPostRepository;
 use Pushword\Repurpose\Service\CarouselFactory;
+use Pushword\Repurpose\Service\CarouselLiveEditing;
 use Pushword\Repurpose\Service\CarouselSchemaProvider;
 use Pushword\Repurpose\Service\ChromiumRasterizer;
 use Pushword\Repurpose\Service\ContactSheet;
@@ -63,6 +64,12 @@ final class RepurposeApiController extends AbstractApiController
         private readonly ChromiumRasterizer $rasterizer,
         private readonly FontInstaller $fontInstaller,
     ) {
+    }
+
+    #[Route('/api/repurpose/{id}/draft', name: 'pushword_api_repurpose_draft', requirements: ['id' => '\d+'], methods: ['POST'])]
+    public function syncDraft(SocialPost $post, Request $request, CarouselLiveEditing $liveEditing): JsonResponse
+    {
+        return $liveEditing->sync($request, $post);
     }
 
     #[Route(path: '/api/repurpose/schema', name: 'pushword_api_repurpose_schema', methods: ['GET'])]

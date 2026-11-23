@@ -7,6 +7,7 @@ namespace Pushword\Repurpose\Controller;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\OptimisticLockException;
+use Pushword\Core\Collaboration\LivePresence;
 use Pushword\Core\Entity\Media;
 use Pushword\Core\Entity\Page;
 use Pushword\Core\Repository\MediaRepository;
@@ -89,12 +90,15 @@ final class RepurposeStudioController extends AbstractController
             $networkUrls[$network] = $this->generateUrl('repurpose_studio_network', ['id' => $post->id, 'network' => $network]);
         }
 
+        $limits = NetworkRegistry::NETWORKS[$carousel->network]['limits'] ?? [];
+
         return $this->render('@PushwordRepurpose/studio.html.twig', [
             'post' => $post,
             'carousel' => $carousel,
             // Slides preview at the network's mobile-feed width, so "is the text
             // big enough?" is judged at the size a scrolling viewer actually sees.
             'feedWidth' => $this->networks->mobileWidth($carousel->network),
+            'slideLimit' => $limits['maxSlides'] ?? $limits['maxPages'] ?? null,
             'backUrl' => $this->backUrl($request),
             'specJs' => json_encode($post->spec, $scriptFlags),
             'videoJs' => json_encode($this->renderedVideo($carousel->video), $scriptFlags),
@@ -250,9 +254,14 @@ final class RepurposeStudioController extends AbstractController
     }
 
     #[Route('/admin/repurpose/studio/{id}/revision', name: 'repurpose_studio_revision', requirements: ['id' => '\d+'], methods: ['GET'])]
-    public function revision(int $id): JsonResponse
+    public function revision(int $id, LivePresence $presence): JsonResponse
     {
-        return new JsonResponse(['revision' => $this->loadPost($id)->revision()], headers: ['Cache-Control' => 'no-store']);
+        $post = $this->loadPost($id);
+
+        return new JsonResponse([
+            'revision' => $post->revision(),
+            'collaborative' => $presence->isActive('repurpose:'.$post->id),
+        ], headers: ['Cache-Control' => 'no-store']);
     }
 
     #[Route('/admin/repurpose/studio/{id}/save', name: 'repurpose_studio_save', requirements: ['id' => '\d+'], methods: ['POST'])]
