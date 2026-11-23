@@ -435,6 +435,54 @@ test('slide duplication and insertion follow the target and respect the network 
   assert.equal(state.spec.slides.length, 4);
 });
 
+test('opening crop scrolls the selected slide into view below the sticky header', () => {
+  const slides = [{images: [{}]}, {images: [{media: 'photo.jpg'}]}];
+  let canvasBox = {left: 420, right: 810, bottom: 320};
+  let toolbarTop = -200;
+  const toolbar = {getBoundingClientRect: () => ({top: toolbarTop})};
+  const deck = {
+    scrollLeft: 25,
+    getBoundingClientRect: () => ({left: 16, right: 374}),
+    closest: selector => selector === '.deck-wrap' ? {
+      querySelector: name => name === '.preview-toolbar' ? toolbar : null,
+    } : null,
+  };
+  const canvas = {getBoundingClientRect: () => canvasBox, closest: selector => selector === '.deck' ? deck : null};
+  const pageScroll = [];
+  let finishedButtonFocused = false;
+  const done = {focus: ({preventScroll}) => { finishedButtonFocused = preventScroll; }};
+  const state = studio({spec: {slides}}, undefined, undefined, {
+    innerHeight: 844,
+    scrollBy: (x, y) => pageScroll.push([x, y]),
+    document: {
+      addEventListener: (_, callback) => callback(),
+      getElementById: id => ({'rp-slide-canvas-1': canvas, 'rp-crop-done': done})[id],
+      querySelector: selector => selector === 'header' ? {getBoundingClientRect: () => ({bottom: 138})} : null,
+    },
+  });
+  state.$nextTick = callback => callback();
+  state._previewTargets = state.previewTargets();
+
+  state.beginCrop(1, 0);
+  assert.equal(state.croppedImage, slides[1].images[0]);
+  assert.equal(deck.scrollLeft, 429);
+  assert.deepEqual(pageScroll, [[0, -354]]);
+  assert.equal(finishedButtonFocused, true);
+  assert.equal(state.scrollPreviewTo(0), null, 'an unrendered slide cannot scroll the page');
+
+  canvasBox = {left: 18, right: 374, bottom: 844};
+  toolbarTop = 138;
+  assert.equal(state.scrollPreviewTo(1), canvas);
+  assert.equal(deck.scrollLeft, 429, 'a fully visible preview keeps its horizontal position');
+  assert.equal(pageScroll.length, 1, 'a fully visible preview keeps its vertical position');
+
+  canvasBox = {left: 12, right: 368, bottom: 895};
+  toolbarTop = 160;
+  state.scrollPreviewTo(1);
+  assert.equal(deck.scrollLeft, 425);
+  assert.deepEqual(pageScroll[1], [0, 6]);
+});
+
 test('the image context menu and crop drag target the clicked cell even over the slide overlay', () => {
   const first = {media: 'first.jpg', focusX: 0.5, focusY: 0.5};
   const second = {media: 'second.jpg', focusX: 0.5, focusY: 0.6};
@@ -457,7 +505,7 @@ test('the image context menu and crop drag target the clicked cell even over the
 
   state.openCanvasMenu(0, event);
   assert.equal(openedMenu.cell, 1);
-  assert.deepEqual(Array.from(openedMenu.items), ['textHere', 'replaceImage', 'cropImage']);
+  assert.deepEqual(Array.from(openedMenu.items), ['textHere', 'replaceImage', 'cropImage', 'freeImageLayout']);
   state.crop = {slide, cell: 1};
   state.deckTextDown(0, {...event, clientX: 200});
   assert.equal(state._drag, null, 'the other cell cannot drag the selected crop');
@@ -474,6 +522,155 @@ test('the image context menu and crop drag target the clicked cell even over the
   assert.equal(second.focusX, 0);
   assert.equal(second.focusY, 0.6, 'a fitted axis stays fixed');
   assert.equal(first.focusX, 0.5);
+  state.crop = null;
+  state.actionMenu = {...openedMenu, trigger: {focus() {}}};
+  state.runCanvasAction('freeImageLayout');
+  assert.equal(slide.imageLayout, 'free');
+  assert.equal(second.x, 0.55);
+});
+
+test('switching from a split gives both images room to move and preserves existing frames', () => {
+  const slide = {imageLayout: 'split-h', overlay: 0.35, images: [{media: 'a.jpg'}, {media: 'b.jpg', x: 0.4, width: 0.32}]};
+  const state = studio({spec: {slides: [slide]}});
+  state.setImageLayout(slide, 'free');
+  assert.deepEqual(slide.images.map(({x, y, width, height}) => [x, y, width, height]), [[0.05, 0.25, 0.4, 0.5], [0.4, 0.25, 0.32, 0.5]]);
+  state.addImage(slide);
+  assert.deepEqual(Array.from(state.imageSlots(slide)), [0, 1, 2]);
+  assert.equal(slide.images[2].height, 0.5);
+  state.clearMedia(0, 0);
+  assert.equal(slide.images[0].media, 'b.jpg');
+  assert.equal(slide.overlay, 0.35);
+  assert.equal(state.payload().slides[0].images.length, 1);
+  state.setImageLayout(slide, 'split-v');
+  assert.deepEqual(Array.from(state.imageSlots(slide)), [0, 1]);
+  state.setImageLayout(slide, 'free');
+  assert.equal(slide.images[0].x, 0.4);
+  assert.equal(slide.images[0].y, 0.25);
+  state.clearMedia(0, 0);
+  assert.equal(slide.overlay, 0);
+  assert.deepEqual(Array.from(state.imageSlots(slide)), [0]);
+
+  const vertical = {imageLayout: 'split-v', images: [{media: 'a.jpg'}, {media: 'b.jpg'}]};
+  state.setImageLayout(vertical, 'free');
+  assert.deepEqual(vertical.images.map(({x, y, width, height}) => [x, y, width, height]), [[0.25, 0.05, 0.5, 0.4], [0.25, 0.55, 0.5, 0.4]]);
+});
+
+test('removing an image from a split only closes the crop for the removed image', () => {
+  const slide = {imageLayout: 'split-h', images: [{media: 'a.jpg'}, {media: 'b.jpg'}]};
+  const document = {addEventListener: (_, callback) => callback(), querySelectorAll: () => []};
+  const state = studio({spec: {slides: [slide]}}, undefined, undefined, {document});
+  state.crop = {slide, cell: 1};
+
+  state.clearMedia(0, 0);
+  assert.equal(slide.images[0].media, '');
+  assert.equal(state.croppedImage.media, 'b.jpg');
+
+  state.clearMedia(0, 1);
+  assert.equal(slide.images[1].media, '');
+  assert.equal(state.crop, null);
+});
+
+test('dragging a free image moves the topmost rendered frame within the slide', () => {
+  const first = {media: 'a.jpg', x: 0.2, y: 0.2, width: 0.4, height: 0.4};
+  const second = {media: 'b.jpg', x: 0.3, y: 0.3, width: 0.5, height: 0.5};
+  const slide = {imageLayout: 'free', images: [first, {}, second]};
+  const state = studio({spec: {slides: [slide]}}, undefined, undefined, {performance: {now: () => 1000}});
+  state._previewTargets = state.previewTargets();
+  let openedMenu;
+  state.openActionMenu = (_, menu) => { openedMenu = menu; };
+  const svgValue = value => ({baseVal: {value}});
+  const blocks = [first, second].map(({x, y, width, height}, index) => {
+    const rect = {x: svgValue(x * 1000), y: svgValue(y * 500), width: svgValue(width * 1000), height: svgValue(height * 500)};
+    const picture = {width: svgValue(750), height: svgValue(350), setAttribute(name, value) { this[name] = value; }};
+    const block = {
+      getAttribute(name) {
+        if (name === 'data-rp-free-image') return String(index);
+        return name === 'transform' ? this.transformAttribute : null;
+      },
+      querySelector: selector => ({'image': picture, '[data-rp-guide="image"]': rect})[selector],
+      setAttribute(name, value) { if (name === 'transform') this.transformAttribute = value; },
+      removeAttribute(name) { if (name === 'transform') delete this.transformAttribute; },
+      transform: {baseVal: {
+        get numberOfItems() { return Number(Boolean(block.transformAttribute)); },
+        getItem() {
+          const [e, f] = block.transformAttribute.match(/-?[\d.]+/g).map(Number);
+          return {matrix: {e, f}};
+        },
+      }},
+    };
+    return block;
+  });
+  const svg = {
+    ...canvasSvg(), getScreenCTM: () => ({a: 0.5, d: 0.5, inverse: () => ({})}),
+    querySelectorAll: selector => selector === '[data-rp-free-image]' ? blocks : [],
+  };
+  const event = {
+    target: {closest: () => null}, currentTarget: {querySelector: selector => selector === 'svg' ? svg : null, focus() {}},
+    clientX: 300, clientY: 170, pointerId: 5, button: 0, preventDefault() {},
+  };
+  state.openCanvasMenu(0, event);
+  assert.equal(openedMenu.cell, 2);
+  assert.deepEqual(Array.from(openedMenu.items), ['textHere', 'replaceImage', 'cropImage']);
+  state.crop = {slide, cell: 2};
+  assert.equal(state.cropFrame(slide).top, '30%');
+  state.crop = null;
+  state.openCanvasMenu(0, {...event, clientX: 115});
+  assert.deepEqual(Array.from(openedMenu.items), ['textHere']);
+  for (const outside of [{clientX: 530}, {clientY: 95}, {clientY: 285}]) {
+    state.openCanvasMenu(0, {...event, ...outside});
+    assert.deepEqual(Array.from(openedMenu.items), ['textHere']);
+  }
+
+  state.textSelection = {slide};
+  state.deckTextDown(0, {...event, clientX: 115});
+  assert.equal(state._drag, null);
+  state.deckTextDown(0, event);
+  assert.equal(state.textSelection, null);
+  state.deckTextMove({...event, clientX: 301});
+  assert.equal(blocks[1].transformAttribute, undefined);
+  state.deckTextCancel({...event, pointerId: 6});
+  assert.equal(state._drag.pointerId, 5, 'another pointer cannot cancel the drag');
+  state.deckTextCancel(event);
+  assert.equal(state._drag, null);
+  state.deckTextDown(0, event);
+  state.deckTextMove({...event, clientX: 350, clientY: 145});
+  assert.equal(blocks[0].transformAttribute, undefined);
+  assert.deepEqual(blocks[1].transformAttribute.match(/-?[\d.]+/g).map(value => Math.round(Number(value))), [100, -50]);
+  state.editorKey({key: 'Escape'});
+  assert.equal(blocks[1].transformAttribute, undefined);
+  assert.deepEqual([second.x, second.y], [0.3, 0.3]);
+
+  state.deckTextDown(0, event);
+  state.deckTextMove({...event, clientY: 600});
+  assert.equal(Math.round(Number(blocks[1].transformAttribute.match(/-?[\d.]+/g)[1])), 100);
+  state.deckTextMove({...event, clientX: 600, clientY: 10});
+  state.deckTextUp(event);
+  assert.deepEqual([second.x, second.y], [0.5, 0]);
+  assert.deepEqual([first.x, first.y], [0.2, 0.2]);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.payload().slides[0].images[1])), {media: 'b.jpg', x: 0.5, y: 0, width: 0.5, height: 0.5});
+
+  const moved = {...event, clientX: 540, clientY: 95};
+  const movedTransform = blocks[1].transformAttribute;
+  state.deckTextDown(0, moved);
+  state.deckTextMove({...moved, clientX: 525, clientY: 120});
+  state.deckTextCancel(moved);
+  assert.equal(blocks[1].transformAttribute, movedTransform, 'cancelling a second drag keeps the previously moved frame');
+
+  state.ensureCells(slide);
+  state.crop = {slide, cell: 2};
+  assert.deepEqual(JSON.parse(JSON.stringify(state.cropFrame(slide))), {left: '50%', top: '0%', width: '50%', height: '50%'});
+  state.deckTextDown(0, event);
+  assert.equal(state._drag, null, 'crop ignores other images');
+  state.deckTextDown(0, moved);
+  state.deckTextMove({...moved, clientX: 590, clientY: 105});
+  state.deckTextUp(moved);
+  assert.equal(second.focusX, 0.1);
+  assert.equal(second.focusY, 0.3);
+  assert.equal(second.x, 0.5);
+  state.crop = null;
+  state.clearMedia(0, 2);
+  state.deckTextDown(0, moved);
+  assert.equal(state._drag, null, 'an old preview cannot drag a deleted image');
 });
 
 test('audio errors stay attached to the exact track and field and clear after validation', () => {
